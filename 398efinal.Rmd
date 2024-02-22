@@ -1,0 +1,196 @@
+---
+title: "CMSC398E Final Project"
+author: "Ishita Chatterjee"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+
+## Installing Necessary Libraries
+```{r}
+#install.packages("RMySQL")
+```
+
+## Loading In Packages
+```{r}
+library(RMySQL)
+library(ggplot2)
+library(gridExtra)
+```
+
+
+## Setting up the connection to MySQL Workbench
+```{r}
+mysqlconnection = dbConnect(RMySQL::MySQL(),
+                            dbname='cmsc398e',
+                            host='localhost',
+                            port=3306,
+                            user='root',
+                            password='Sql_123')
+```
+
+## Problem Statement
+What factors impact relationship satisfaction? Factors such as age and length of relationship will be considered. The data was collected via surveys so each column represents answers for one question. When necessary, scores for each question will be aggregated into one score for each variable. Data was collected from both members in a couple so all variables are duplicated and labeled with "a" and"b".
+
+## Age: Data Processing
+The first step is to create aggregate scores of satisfaction in SQL. 
+```{r}
+create_sat_scores = "update cmsc398e.relationships set sat_atotal = `ï»¿sat1_a` + sat2_a + sat3_a + sat4_a, sat_btotal = sat1_b + sat2_b + sat3_b + sat4_b;"
+```
+
+Rows where either sat_total is 0 will be deleted. A score of 0 means that the participant did not answer any of the satisfaction questions and so their data can not be used. 
+```{r}
+delete_sat_0 = "delete from cmsc398e.relationships where sat_atotal = 0 or sat_btotal = 0;"
+```
+
+Next, IDs for each row will be created using SQL's row_number() function and all the variables of interest will be selected. This query will be saved in a CTE so the IDs can be referenced later. After the CTE is created, satisfaction will be averaged over age for each person to understand relationship between age and satisfaction. 
+```{r}
+avg_sat_over_age = "with t1 as (select row_number() over (order by age_a) as id, age_a, sat_atotal, age_b, sat_btotal from cmsc398e.relationships) select id, age_a, round (avg(sat_atotal) over (partition by age_a)) as avg_sat_by_age_a, age_b, round (avg(sat_btotal) over (partition by age_b)) as avg_sat_by_age_b from t1 order by id;"
+```
+
+The queries will be sent to the connection to be executed. The result will be saved into a dataframe. The age columns will be changed into numeric columns to aid in analysis. 
+```{r}
+result1 = dbSendQuery(mysqlconnection, create_sat_scores) 
+result2 = dbSendQuery(mysqlconnection, delete_sat_0)
+result3 = dbSendQuery(mysqlconnection, avg_sat_over_age) 
+
+age_and_sat = fetch(result3)
+age_and_sat$age_a <- as.numeric(age_and_sat$age_a)
+age_and_sat$age_b <- as.numeric(age_and_sat$age_b)
+```
+
+## Age: Hypothesis
+The hypothesis is that as age increases, satisfaction will decrease. Younger people are likely to have less expectations for relationships and less to compare to which will increase their relationship satisfaction. 
+
+## Age: Analysis
+The age and average satisfaction will be graphed in a scatterplot to show any trends in the data. 
+```{r}
+colors <- c("Person A" = "blue", "Person B" = "red")
+
+age <- ggplot(age_and_sat, aes("age", satisfaction)) + geom_point(aes(x = age_a, y = avg_sat_by_age_a, color = "Person A")) + geom_point(aes(x = age_b, y = avg_sat_by_age_b, color = "Person B")) + labs(title="Age and Average Satisfaction",x="Age", y = "Satisfaction", color = "Legend") + scale_color_manual(values = colors)
+age
+
+
+```
+
+There is not a clear upward or downward trend based on the graph. Correlation analyses will be run to determine if there is any correlation between these variables. 
+```{r}
+# correlation for person a
+cor.test(age_and_sat$age_a,age_and_sat$avg_sat_by_age_a) 
+
+# correlation for person b
+cor.test(age_and_sat$age_b,age_and_sat$avg_sat_by_age_b) 
+```
+Both correlation tests show a negative correlation between age and average satisfaction but the correlation is only statistically significant for person B. Next, linear regression analyses will be performed to see if age predicts average satisfaction. First, the necessary packages need to be loaded in. 
+```{r}
+library(GGally)
+library(caret)
+library(dplyr)
+library(vctrs)
+library(pacman)
+p_load(tidyverse,rpart,tidymodels)
+```
+Next, the data will be split into training and testing data. 80% of the data will be used as training data. 
+```{r}
+data_split <- 
+  age_and_sat %>%  rsample::initial_split(
+    data = ,
+    prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+```
+
+Then, the regression analyses will be run for both people. 
+```{r}
+train_index_a <- createDataPartition(age_and_sat$avg_sat_by_age_a, p = 0.8, list = FALSE)
+train_data_a <- age_and_sat[train_index_a, ]
+test_data_a <- age_and_sat[-train_index_a, ]
+
+linear_model_a = lm(avg_sat_by_age_a ~ age_a, data = train_data_a)
+summary(linear_model_a)
+
+train_index_b <- createDataPartition(age_and_sat$avg_sat_by_age_b, p = 0.8, list = FALSE)
+train_data_b <- age_and_sat[train_index_b, ]
+test_data_b <- age_and_sat[-train_index_b, ]
+
+linear_model_b = lm(avg_sat_by_age_b ~ age_b, data = train_data_b)
+summary(linear_model_b)
+```
+## Age: Conclusion
+The linear regression shows that age has a negative coefficient for both people. However, it is only statistically significant for person B. This means that as age increases, satisfaction does decrease.   
+
+## Length of Relationship: Data Processing
+The next factor studied will be the length of the relationship. First, two new columns need to be added to the table. This columns will represent the categorization of the length of the relationship. 
+```{r}
+add_columns = "alter table cmsc398e.relationships add column romlen_aformatted int, add column romlen_bformatted int;"
+```
+
+Next, the columns will be updated with the corresponding category. 2 represents longer than one year, 1 represents less than one year, and 0 represents miscellaneous because the data does not fit any format. 
+```{r}
+update_categories = "update cmsc398e.relationships set romlen_aformatted = case when romlen_a like '%year%' and romlen_a like '%month%' then 2 when romlen_a like '%year%' then 2 when romlen_a like '%month%' then 1 else 0 end, romlen_bformatted = case when romlen_b like '%year%' and romlen_b like '%month%' then 2 when romlen_b like '%year%' then 2 when romlen_b like '%month%' then 1 else 0 end;"
+```
+
+The rows where the formatted length is 0 or miscellaneous will be deleted from the table. After this deletion, there will be two categories left (1 and 2). 
+```{r}
+delete_misc = "delete from cmsc398e.relationships where romlen_aformatted = 0 or romlen_bformatted = 0;"
+```
+
+Lastly, all of the variables of interest will be selected. 
+```{r}
+select_from_table = "select row_number() over (order by age_a) as id, age_a, romlen_a, romlen_aformatted, sat_atotal, age_b, romlen_b, romlen_bformatted, sat_btotal from cmsc398e.relationships;"
+```
+
+The queries will be sent to the connection to be executed. The result will be saved into a dataframe. The romlen_formatted columns will be changed into factor columns to aid in analysis. The satisfaction columns will be changed into numeric columns. 
+```{r}
+result3 = dbSendQuery(mysqlconnection, update_categories) 
+result4 = dbSendQuery(mysqlconnection, delete_misc) 
+result5 = dbSendQuery(mysqlconnection, select_from_table) 
+
+romlen = fetch(result5)
+romlen$romlen_aformatted <- as.factor(romlen$romlen_aformatted)
+romlen$romlen_bformatted <- as.factor(romlen$romlen_bformatted)
+romlen$sat_atotal <- as.numeric(romlen$sat_atotal)
+romlen$sat_btotal <- as.numeric(romlen$sat_btotal)
+```
+
+## Length of Relationship: Hypothesis
+The hypothesis is that as length of relationship increases, satisfaction will also increase. People are likely to be happier when the relationship has lasted longer. 
+
+## Length of Relationship: Analysis
+The data will be graphed with boxplots to show any trends. 
+```{r}
+romlen_a <- ggplot(romlen, aes(x=romlen_aformatted, y=sat_atotal)) + geom_boxplot() + labs(title="Length of Relationship and Satisfaction for Person A",x="Length of Relationship", y = "Satisfaction") + scale_x_discrete(breaks=c("1","2"), labels=c("< 1 year", "> 1 year"))
+romlen_a
+
+romlen_b <- ggplot(romlen, aes(x=romlen_bformatted, y=sat_btotal)) + geom_boxplot() + labs(title="Length of Relationship and Satisfaction for Person B",x="Length of Relationship", y = "Satisfaction") + scale_x_discrete(breaks=c("1","2"), labels=c("< 1 year", "> 1 year"))
+romlen_b
+```
+Next, linear regression analyses will be run to see if length of relationship predicts satisfaction. First, the data will be split into training and testing data. 80% of the data will be used as training data. 
+```{r}
+data_splitrl <- 
+  romlen %>%  rsample::initial_split(
+    data = ,
+    prop = 0.8)
+train_datarl <- training(data_splitrl)
+test_datarl <- testing(data_splitrl)
+```
+
+Then, the regression analyses will be run for both people. 
+```{r}
+train_index_arl <- createDataPartition(romlen$sat_atotal, p = 0.8, list = FALSE)
+train_data_arl <- romlen[train_index_arl, ]
+test_data_arl <- romlen[-train_index_arl, ]
+
+linear_model_arl = lm(sat_atotal ~ romlen_aformatted, data = train_data_arl)
+summary(linear_model_arl)
+
+train_index_brl <- createDataPartition(romlen$sat_btotal, p = 0.8, list = FALSE)
+train_data_brl <- romlen[train_index_brl, ]
+test_data_brl <- romlen[-train_index_brl, ]
+
+linear_model_brl = lm(sat_btotal ~ romlen_bformatted, data = train_data_brl)
+summary(linear_model_brl)
+```
+
+## Length of Relationship: Conclusion
+For both people, the coefficient was positive but neither was significant. This means that length of relationship did not significantly predict relationship satisfaction. 
